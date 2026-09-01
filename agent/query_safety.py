@@ -48,7 +48,7 @@ def validate_sql(sql: str) -> tuple[bool, str]:
         return False, "Empty query."
 
     stripped = sql.strip().rstrip(";").strip()
-    
+
     if ";" in stripped:
         return False, "Multiple statements are not permitted."
 
