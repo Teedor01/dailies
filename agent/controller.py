@@ -1,3 +1,27 @@
+"""
+controller.py
+
+The deterministic state machine: OBSERVE -> INVESTIGATE -> HYPOTHESIZE ->
+VERIFY -> BRIEF. This file owns every state transition itself -- the two
+LlmAgents (tool_reasoner, pure_reasoner) never decide what happens next, they
+only answer the single question they're asked for that step. See
+architecture v2, Section 8.
+
+VERIFIED LIVE (Sep 1): a full run completed OBSERVE through BRIEF against
+real ClickHouse Cloud data and real Gemini, and the resulting Brief passed
+validate_brief() cleanly. Three real issues from that run are fixed here:
+  1. Failed tool calls (ClickHouse errors) were being logged as
+     "observed_fact" evidence, same type as real data. Now tagged
+     "query_error" and validate_brief() refuses to let anything cite one.
+  2. VERIFY's proposed query wasn't reliably scoped to the anomaly's own
+     region/time window (one verify run queried the whole dataset with no
+     filter and still got classified "verified"). The anomaly is now passed
+     into verify() and the prompt explicitly restates the window to filter by.
+  3. validate_brief() only checked claims[]/rejected_hypotheses[] for causal
+     language, not the top-level summary -- "due to" slipped through there
+     on the live run. Now checked too (see evidence.py).
+"""
+
 import json
 
 from anomaly_detector import detect_anomalies
@@ -9,6 +33,21 @@ from evidence import new_evidence_entry, HypothesisSet, Brief, validate_brief
 
 def _strip_detail(anomaly: dict) -> dict:
     return {k: v for k, v in anomaly.items() if k != "hourly_detail"}
+
+
+def _response_is_error(response) -> bool:
+    """
+    MCP tool responses observed live look like:
+        {"content": [...], "structuredContent": {...}, "isError": false}
+    or on failure:
+        {"content": [{"type": "text", "text": "Query execution failed: ..."}], "isError": true}
+    Defensive about shape -- if isError isn't present or response isn't a
+    dict, treat it as not-an-error rather than crashing (the citation
+    validator is the backstop either way).
+    """
+    if isinstance(response, dict):
+        return bool(response.get("isError"))
+    return False
 
 
 class InvestigationController:
@@ -28,7 +67,9 @@ class InvestigationController:
     def _emit(self, step, payload):
         self.on_event(step, payload)
 
-
+    # ------------------------------------------------------------------
+    # OBSERVE -- deterministic, no LLM
+    # ------------------------------------------------------------------
     def observe(self) -> list[dict]:
         self._emit("OBSERVE", {"status": "running"})
         anomalies = detect_anomalies(self.run_query, self.title_id)
@@ -46,22 +87,31 @@ class InvestigationController:
                     f"{a['window_start_hour']}-{a['window_end_hour']} "
                     f"(observed={a['observed_value']}, baseline={baseline_val})"
                 ),
-                sql=None,  
+                sql=None,  # anomaly_detection.sql -- same query for every anomaly, omitted per-entry
                 result_sample=a,
             )
-            
+            # tag the anomaly dict itself with the evidence id it produced,
+            # so investigate() can cite it
             a["_evidence_id"] = self.evidence_log[-1]["id"]
 
         self._emit("OBSERVE", {"status": "done", "anomaly_count": len(anomalies)})
         return anomalies
 
+    # ------------------------------------------------------------------
+    # INVESTIGATE -- Gemini proposes queries, safety-gated, real MCP calls
+    # ------------------------------------------------------------------
     def investigate(self, anomaly: dict) -> list[str]:
         self._emit("INVESTIGATE", {"status": "running", "anomaly_id": anomaly["anomaly_id"]})
         agent = build_investigate_agent()
         prompt = (
             "Here is a confirmed anomaly, detected deterministically (not by you):\n\n"
             f"{json.dumps(_strip_detail(anomaly), indent=2)}\n\n"
-            f"Investigate why this happened. The title_id is '{self.title_id}'."
+            f"Investigate why this happened. The title_id is '{self.title_id}'.\n\n"
+            "IMPORTANT: window_start_timestamp and window_end_timestamp above are the exact "
+            "real calendar boundaries of this anomaly, already computed for you. Filter every "
+            "query using `timestamp >= 'window_start_timestamp' AND timestamp < 'window_end_timestamp'` "
+            "with those literal values. Do NOT compute hour-since-release yourself, do NOT use "
+            "toHour(timestamp) as a substitute for this, and do NOT guess or invent any date."
         )
         _, tool_calls = run_agent_with_tool_calls(agent, prompt)
 
@@ -70,9 +120,16 @@ class InvestigationController:
             if call["tool_name"] not in ("run_query", "run_chdb_select_query"):
                 continue
             sql = call["args"].get("query", str(call["args"]))
+            is_error = _response_is_error(call["response"])
             entry = new_evidence_entry(
-                self.evidence_log, "observed_fact", "INVESTIGATE",
-                claim_text=f"Investigation query result for anomaly {anomaly['anomaly_id']}",
+                self.evidence_log,
+                "query_error" if is_error else "observed_fact",
+                "INVESTIGATE",
+                claim_text=(
+                    f"Query FAILED during investigation of anomaly {anomaly['anomaly_id']}"
+                    if is_error else
+                    f"Investigation query result for anomaly {anomaly['anomaly_id']}"
+                ),
                 sql=sql,
                 result_sample=call["response"],
             )
@@ -81,8 +138,9 @@ class InvestigationController:
         self._emit("INVESTIGATE", {"status": "done", "evidence_ids": new_ids})
         return new_ids
 
-
-
+    # ------------------------------------------------------------------
+    # HYPOTHESIZE -- Gemini reasons ONLY over evidence already gathered
+    # ------------------------------------------------------------------
     def hypothesize(self, anomaly: dict, evidence_ids: list[str]) -> list[dict]:
         self._emit("HYPOTHESIZE", {"status": "running"})
         agent = build_hypothesize_agent()
@@ -107,11 +165,28 @@ class InvestigationController:
         self._emit("HYPOTHESIZE", {"status": "done", "hypotheses": hyps})
         return hyps
 
-    def verify(self, hypothesis: dict) -> dict:
+    # ------------------------------------------------------------------
+    # VERIFY -- Gemini proposes ONE targeted query; verdict classified
+    # deterministically from the agent's own stated SUPPORTS/CONTRADICTS text
+    # ------------------------------------------------------------------
+    def verify(self, anomaly: dict, hypothesis: dict) -> dict:
         self._emit("VERIFY", {"status": "running", "hypothesis_id": hypothesis["hypothesis_id"]})
         agent = build_verify_agent()
         prompt = (
             f"Hypothesis to verify: {hypothesis['text']}\n\n"
+            "This hypothesis concerns the following anomaly. Unless the hypothesis is "
+            "specifically claiming the issue is NOT limited to this window (e.g. a ubiquitous "
+            "platform-wide bug), your verification query MUST filter to this same region and "
+            "time window -- a query against the whole dataset with no region/time filter does "
+            "not verify a region- and time-specific hypothesis, it just describes averages "
+            "everywhere and proves nothing about THIS anomaly:\n\n"
+            f"{json.dumps(_strip_detail(anomaly), indent=2)}\n\n"
+            "IMPORTANT: window_start_timestamp and window_end_timestamp above are the exact "
+            "real calendar boundaries of this anomaly, already computed for you. Filter using "
+            "`timestamp >= 'window_start_timestamp' AND timestamp < 'window_end_timestamp'` "
+            "with those literal values. Do NOT compute hour-since-release yourself, do NOT use "
+            "toHour(timestamp) as a substitute for this, and do NOT guess or invent any date -- "
+            "this exact mistake produced a wrong verdict on a prior live run.\n\n"
             "Propose and run ONE targeted query to confirm or disconfirm this specific hypothesis."
         )
         text, tool_calls = run_agent_with_tool_calls(agent, prompt)
@@ -120,9 +195,16 @@ class InvestigationController:
         for call in tool_calls:
             if call["tool_name"] not in ("run_query", "run_chdb_select_query"):
                 continue
+            is_error = _response_is_error(call["response"])
             entry = new_evidence_entry(
-                self.evidence_log, "observed_fact", "VERIFY",
-                claim_text=f"Verification query result for hypothesis {hypothesis['hypothesis_id']}",
+                self.evidence_log,
+                "query_error" if is_error else "observed_fact",
+                "VERIFY",
+                claim_text=(
+                    f"Verification query FAILED for hypothesis {hypothesis['hypothesis_id']}"
+                    if is_error else
+                    f"Verification query result for hypothesis {hypothesis['hypothesis_id']}"
+                ),
                 sql=call["args"].get("query", str(call["args"])),
                 result_sample=call["response"],
             )
@@ -151,20 +233,53 @@ class InvestigationController:
         self._emit("VERIFY", {"status": "done", **result})
         return result
 
-    def brief(self) -> dict:
+    # ------------------------------------------------------------------
+    # BRIEF -- Gemini writes the report, no tools, structured output,
+    # validated before it's trusted
+    # ------------------------------------------------------------------
+    def brief(self, max_retries: int = 2) -> dict:
+        """
+        Generates the Brief, validates it, and -- if validate_brief() finds
+        problems -- feeds those specific problems back to the agent and asks
+        it to fix them, up to max_retries times. A caught violation should be
+        an opportunity to self-correct, not just a label attached to a brief
+        that ships with the violation still in it. If it still fails after
+        retries, returns the last attempt with problems attached honestly
+        rather than pretending it's clean.
+        """
         self._emit("BRIEF", {"status": "running"})
         agent = build_brief_agent()
-        prompt = (
+        base_prompt = (
             f"Full evidence log for this investigation:\n"
             f"{json.dumps(self.evidence_log, indent=2, default=str)}\n\n"
             "Write the final evidence-backed brief."
         )
-        text, _ = run_agent_with_tool_calls(agent, prompt)
-        brief_obj = Brief.model_validate_json(text)
-        problems = validate_brief(brief_obj, self.evidence_log)
 
-        result = {"brief": brief_obj.model_dump(), "validation_problems": problems}
-        self._emit("BRIEF", {"status": "done", "problems": problems})
+        prompt = base_prompt
+        brief_obj = None
+        problems = []
+        for attempt in range(max_retries + 1):
+            text, _ = run_agent_with_tool_calls(agent, prompt)
+            brief_obj = Brief.model_validate_json(text)
+            problems = validate_brief(brief_obj, self.evidence_log)
+
+            if not problems:
+                break
+
+            self._emit("BRIEF", {"status": "retrying", "attempt": attempt + 1, "problems": problems})
+            if attempt < max_retries:
+                prompt = (
+                    base_prompt + "\n\n"
+                    "Your previous attempt had these specific problems -- fix EXACTLY these, "
+                    "do not introduce new ones:\n" + "\n".join(f"- {p}" for p in problems)
+                )
+
+        result = {
+            "brief": brief_obj.model_dump(),
+            "validation_problems": problems,
+            "attempts": attempt + 1,
+        }
+        self._emit("BRIEF", {"status": "done", "problems": problems, "attempts": attempt + 1})
         return result
 
     # ------------------------------------------------------------------
@@ -174,5 +289,5 @@ class InvestigationController:
             evidence_ids = self.investigate(anomaly)
             hypotheses = self.hypothesize(anomaly, evidence_ids)
             for h in hypotheses:
-                self.verify(h)
+                self.verify(anomaly, h)
         return self.brief()

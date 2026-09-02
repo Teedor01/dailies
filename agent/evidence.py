@@ -1,13 +1,30 @@
+"""
+evidence.py
+
+The evidence log (plain Python, append-only list of dicts) and the structured
+Brief output schema (a pydantic model, used as LlmAgent's output_schema so
+Gemini's response is forced into this shape rather than free text).
+
+Structured citations, not number-extraction: the BRIEF step must attach
+evidence_log ids to each individual claim, not just produce prose that a
+regex later tries to match numbers against. See architecture v2, correction 3.
+"""
+
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+# ---------------------------------------------------------------------------
+# Evidence log
+# ---------------------------------------------------------------------------
+
 EvidenceType = Literal[
-    "observed_fact",        
-    "correlation",           
-    "hypothesis",             
-    "verified_finding",      
-    "rejected_hypothesis",    
+    "observed_fact",        # directly returned by a query, no interpretation
+    "correlation",           # two observed facts co-occurring in region/time window
+    "hypothesis",             # a proposed explanation, unverified
+    "verified_finding",       # a hypothesis that survived its VERIFY query
+    "rejected_hypothesis",    # a hypothesis contradicted by its VERIFY query
+    "query_error",             # a tool call that FAILED -- never cite this as data
 ]
 
 
@@ -33,6 +50,10 @@ def new_evidence_entry(
     evidence_log.append(entry)
     return entry
 
+
+# ---------------------------------------------------------------------------
+# Structured BRIEF output schema
+# ---------------------------------------------------------------------------
 
 class Claim(BaseModel):
     text: str = Field(description="One factual claim, plain language, no causal language unless verified.")
@@ -60,15 +81,24 @@ class Brief(BaseModel):
     rejected_hypotheses: list[RejectedHypothesis] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Citation validator -- runs on the structured Brief BEFORE it reaches the UI
+# ---------------------------------------------------------------------------
+
 def validate_brief(brief: Brief, evidence_log: list[dict]) -> list[str]:
     """
     Returns a list of problems; empty list means the brief is clean.
-    Checks, per correction 3 in architecture v2:
+    Checks:
       - every claim has at least one citation
       - every cited id actually exists in evidence_log
+      - NO claim or rejected-hypothesis entry may cite a 'query_error' entry --
+        a failed tool call is never data, no matter what the LLM does with it
       - a claim citing only 'hypothesis' or 'rejected_hypothesis' entries
         (never a 'verified_finding' or 'observed_fact') cannot use causal
         language
+      - the top-level summary itself cannot use causal language either --
+        this was a real gap: a claim-level check alone let "due to" slip
+        through in the summary field on a live run (Sep 1)
     """
     problems = []
     valid_ids = {e["id"] for e in evidence_log}
@@ -80,6 +110,9 @@ def validate_brief(brief: Brief, evidence_log: list[dict]) -> list[str]:
         lower = text.lower()
         return any(w in lower for w in CAUSAL_WORDS)
 
+    if has_causal_language(brief.summary):
+        problems.append(f"Summary uses causal language: '{brief.summary}'")
+
     for claim in brief.claims:
         if not claim.citations:
             problems.append(f"Claim has no citations: '{claim.text}'")
@@ -87,6 +120,8 @@ def validate_brief(brief: Brief, evidence_log: list[dict]) -> list[str]:
         for cid in claim.citations:
             if cid not in valid_ids:
                 problems.append(f"Claim cites unknown evidence id '{cid}': '{claim.text}'")
+            elif entry_by_id[cid]["entry_type"] == "query_error":
+                problems.append(f"Claim cites a FAILED query ('{cid}') as if it were data: '{claim.text}'")
 
         cited_types = {entry_by_id[c]["entry_type"] for c in claim.citations if c in entry_by_id}
         if has_causal_language(claim.text) and "verified_finding" not in cited_types:
@@ -100,5 +135,7 @@ def validate_brief(brief: Brief, evidence_log: list[dict]) -> list[str]:
         for cid in rh.citations:
             if cid not in valid_ids:
                 problems.append(f"Rejected hypothesis cites unknown evidence id '{cid}': '{rh.text}'")
+            elif entry_by_id[cid]["entry_type"] == "query_error":
+                problems.append(f"Rejected hypothesis cites a FAILED query ('{cid}') as if it were data: '{rh.text}'")
 
     return problems

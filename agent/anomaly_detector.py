@@ -1,4 +1,22 @@
+"""
+anomaly_detector.py
+
+Deterministic OBSERVE step. Runs the fixed anomaly_detection.sql query
+(no LLM involved) and consolidates consecutive-hour rows for the same
+(region, anomaly_type) into windowed Anomaly objects.
+
+Each Anomaly object carries explicit ABSOLUTE timestamp boundaries
+(window_start_timestamp / window_end_timestamp), not just relative
+hour-since-release numbers. This exists because a live run showed agents
+guessing wildly at real dates (2023-11-01, then 2026-07-02, then an
+unrelated 2026-07-05) when only given "hours 6-9 since release" -- release
+time isn't midnight, so relative-hour windows don't map to obvious calendar
+boundaries, and asking an LLM to compute that itself is an unforced error.
+Computing it once, deterministically, here removes the whole failure class.
+"""
+
 import os
+from datetime import datetime, timedelta
 
 ANOMALY_SQL_PATH = os.path.join(os.path.dirname(__file__), "..", "clickhouse", "anomaly_detection.sql")
 
@@ -9,6 +27,13 @@ def load_anomaly_sql(title_id: str) -> str:
     no_comments = "\n".join(l for l in sql.splitlines() if not l.strip().startswith("--"))
     sql = no_comments.replace("{title_id:String}", f"'{title_id}'")
     return sql.strip().rstrip(";")
+
+
+def _parse_release_datetime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    # ClickHouse DateTime typically comes back as "YYYY-MM-DD HH:MM:SS"
+    return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
 
 def detect_anomalies(run_query, title_id: str, min_consecutive_hours: int = 2) -> list[dict]:
@@ -56,6 +81,10 @@ def detect_anomalies(run_query, title_id: str, min_consecutive_hours: int = 2) -
             else max(w["rows"], key=lambda r: float(r["views_this_hour"]))
         )
 
+        release_dt = _parse_release_datetime(first_row["release_datetime"])
+        window_start_ts = release_dt + timedelta(hours=w["window_start_hour"])
+        window_end_ts = release_dt + timedelta(hours=w["window_end_hour"] + 1)  # exclusive upper bound
+
         anomaly_id = f"anom_{len(consolidated) + 1:03d}"
         consolidated.append({
             "anomaly_id": anomaly_id,
@@ -64,6 +93,8 @@ def detect_anomalies(run_query, title_id: str, min_consecutive_hours: int = 2) -
             "metric": "avg_completion_pct" if is_completion else "views_this_hour",
             "window_start_hour": w["window_start_hour"],
             "window_end_hour": w["window_end_hour"],
+            "window_start_timestamp": window_start_ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "window_end_timestamp": window_end_ts.strftime("%Y-%m-%d %H:%M:%S"),
             "observed_value": float(
                 worst_row["avg_completion_pct"] if is_completion else worst_row["views_this_hour"]
             ),
