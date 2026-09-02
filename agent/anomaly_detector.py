@@ -1,20 +1,3 @@
-"""
-anomaly_detector.py
-
-Deterministic OBSERVE step. Runs the fixed anomaly_detection.sql query
-(no LLM involved) and consolidates consecutive-hour rows for the same
-(region, anomaly_type) into windowed Anomaly objects.
-
-Each Anomaly object carries explicit ABSOLUTE timestamp boundaries
-(window_start_timestamp / window_end_timestamp), not just relative
-hour-since-release numbers. This exists because a live run showed agents
-guessing wildly at real dates (2023-11-01, then 2026-07-02, then an
-unrelated 2026-07-05) when only given "hours 6-9 since release" -- release
-time isn't midnight, so relative-hour windows don't map to obvious calendar
-boundaries, and asking an LLM to compute that itself is an unforced error.
-Computing it once, deterministically, here removes the whole failure class.
-"""
-
 import os
 from datetime import datetime, timedelta
 
@@ -32,7 +15,7 @@ def load_anomaly_sql(title_id: str) -> str:
 def _parse_release_datetime(value) -> datetime:
     if isinstance(value, datetime):
         return value
-    # ClickHouse DateTime typically comes back as "YYYY-MM-DD HH:MM:SS"
+    
     return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
 
 

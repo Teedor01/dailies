@@ -1,27 +1,3 @@
-"""
-controller.py
-
-The deterministic state machine: OBSERVE -> INVESTIGATE -> HYPOTHESIZE ->
-VERIFY -> BRIEF. This file owns every state transition itself -- the two
-LlmAgents (tool_reasoner, pure_reasoner) never decide what happens next, they
-only answer the single question they're asked for that step. See
-architecture v2, Section 8.
-
-VERIFIED LIVE (Sep 1): a full run completed OBSERVE through BRIEF against
-real ClickHouse Cloud data and real Gemini, and the resulting Brief passed
-validate_brief() cleanly. Three real issues from that run are fixed here:
-  1. Failed tool calls (ClickHouse errors) were being logged as
-     "observed_fact" evidence, same type as real data. Now tagged
-     "query_error" and validate_brief() refuses to let anything cite one.
-  2. VERIFY's proposed query wasn't reliably scoped to the anomaly's own
-     region/time window (one verify run queried the whole dataset with no
-     filter and still got classified "verified"). The anomaly is now passed
-     into verify() and the prompt explicitly restates the window to filter by.
-  3. validate_brief() only checked claims[]/rejected_hypotheses[] for causal
-     language, not the top-level summary -- "due to" slipped through there
-     on the live run. Now checked too (see evidence.py).
-"""
-
 import json
 
 from anomaly_detector import detect_anomalies
@@ -53,7 +29,7 @@ def _response_is_error(response) -> bool:
 class InvestigationController:
     def __init__(self, run_query, title_id: str, on_event=None):
         """
-        run_query: callable(sql: str) -> list[dict], from db_adapters.py --
+        run_query: callable(sql: str) -> list[dict], from db_adapters.py...
             used ONLY for the deterministic OBSERVE step, never for agent calls.
         title_id: the title under investigation.
         on_event: optional callback(step: str, payload: dict), for a future
@@ -67,9 +43,7 @@ class InvestigationController:
     def _emit(self, step, payload):
         self.on_event(step, payload)
 
-    # ------------------------------------------------------------------
-    # OBSERVE -- deterministic, no LLM
-    # ------------------------------------------------------------------
+
     def observe(self) -> list[dict]:
         self._emit("OBSERVE", {"status": "running"})
         anomalies = detect_anomalies(self.run_query, self.title_id)
@@ -87,19 +61,16 @@ class InvestigationController:
                     f"{a['window_start_hour']}-{a['window_end_hour']} "
                     f"(observed={a['observed_value']}, baseline={baseline_val})"
                 ),
-                sql=None,  # anomaly_detection.sql -- same query for every anomaly, omitted per-entry
+                sql=None,  
                 result_sample=a,
             )
-            # tag the anomaly dict itself with the evidence id it produced,
-            # so investigate() can cite it
+
             a["_evidence_id"] = self.evidence_log[-1]["id"]
 
         self._emit("OBSERVE", {"status": "done", "anomaly_count": len(anomalies)})
         return anomalies
 
-    # ------------------------------------------------------------------
-    # INVESTIGATE -- Gemini proposes queries, safety-gated, real MCP calls
-    # ------------------------------------------------------------------
+
     def investigate(self, anomaly: dict) -> list[str]:
         self._emit("INVESTIGATE", {"status": "running", "anomaly_id": anomaly["anomaly_id"]})
         agent = build_investigate_agent()
@@ -138,9 +109,7 @@ class InvestigationController:
         self._emit("INVESTIGATE", {"status": "done", "evidence_ids": new_ids})
         return new_ids
 
-    # ------------------------------------------------------------------
-    # HYPOTHESIZE -- Gemini reasons ONLY over evidence already gathered
-    # ------------------------------------------------------------------
+
     def hypothesize(self, anomaly: dict, evidence_ids: list[str]) -> list[dict]:
         self._emit("HYPOTHESIZE", {"status": "running"})
         agent = build_hypothesize_agent()
@@ -165,10 +134,7 @@ class InvestigationController:
         self._emit("HYPOTHESIZE", {"status": "done", "hypotheses": hyps})
         return hyps
 
-    # ------------------------------------------------------------------
-    # VERIFY -- Gemini proposes ONE targeted query; verdict classified
-    # deterministically from the agent's own stated SUPPORTS/CONTRADICTS text
-    # ------------------------------------------------------------------
+
     def verify(self, anomaly: dict, hypothesis: dict) -> dict:
         self._emit("VERIFY", {"status": "running", "hypothesis_id": hypothesis["hypothesis_id"]})
         agent = build_verify_agent()
@@ -185,7 +151,7 @@ class InvestigationController:
             "real calendar boundaries of this anomaly, already computed for you. Filter using "
             "`timestamp >= 'window_start_timestamp' AND timestamp < 'window_end_timestamp'` "
             "with those literal values. Do NOT compute hour-since-release yourself, do NOT use "
-            "toHour(timestamp) as a substitute for this, and do NOT guess or invent any date -- "
+            "toHour(timestamp) as a substitute for this, and do NOT guess or invent any date... "
             "this exact mistake produced a wrong verdict on a prior live run.\n\n"
             "Propose and run ONE targeted query to confirm or disconfirm this specific hypothesis."
         )
@@ -233,14 +199,11 @@ class InvestigationController:
         self._emit("VERIFY", {"status": "done", **result})
         return result
 
-    # ------------------------------------------------------------------
-    # BRIEF -- Gemini writes the report, no tools, structured output,
-    # validated before it's trusted
-    # ------------------------------------------------------------------
+
     def brief(self, max_retries: int = 2) -> dict:
         """
-        Generates the Brief, validates it, and -- if validate_brief() finds
-        problems -- feeds those specific problems back to the agent and asks
+        Generates the Brief, validates it, and... if validate_brief() finds
+        problems, feeds those specific problems back to the agent and asks
         it to fix them, up to max_retries times. A caught violation should be
         an opportunity to self-correct, not just a label attached to a brief
         that ships with the violation still in it. If it still fails after
@@ -270,7 +233,7 @@ class InvestigationController:
             if attempt < max_retries:
                 prompt = (
                     base_prompt + "\n\n"
-                    "Your previous attempt had these specific problems -- fix EXACTLY these, "
+                    "Your previous attempt had these specific problems... fix EXACTLY these, "
                     "do not introduce new ones:\n" + "\n".join(f"- {p}" for p in problems)
                 )
 
@@ -282,7 +245,7 @@ class InvestigationController:
         self._emit("BRIEF", {"status": "done", "problems": problems, "attempts": attempt + 1})
         return result
 
-    # ------------------------------------------------------------------
+
     def run_full_investigation(self) -> dict:
         anomalies = self.observe()
         for anomaly in anomalies:
