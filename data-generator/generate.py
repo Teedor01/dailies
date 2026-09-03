@@ -30,7 +30,7 @@ VIEWING_EVENTS_SCHEMA = pa.schema([
 def views_this_hour(peak, hour, half_life):
     """Exponential decay from a peak, with a short ramp-up in hour 0-1."""
     decay = peak * (0.5 ** (hour / half_life))
-    ramp = min(1.0, (hour + 1) / 2.0)  # ramps up over the first ~2 hours
+    ramp = min(1.0, (hour + 1) / 2.0)  
     return max(decay * ramp, 50)
 
 
@@ -111,7 +111,7 @@ def generate_hour_rows(title_id, region, hour, session_start_base, n_rows,
             buffering[affected_mask] = RNG.poisson(
                 negative_override["affected_buffering_lambda"], n_affected
             )
-        # mild regionwide chilling effect on everyone else in this window
+        
         unaffected_mask = ~affected_mask
         completion[unaffected_mask] *= negative_override["unaffected_dampening"]
 
@@ -199,6 +199,7 @@ def main():
     import os
     os.makedirs(OUT_DIR, exist_ok=True)
 
+    # --- titles.parquet ---
     titles_rows = []
     for t in sc.COMPARABLE_TITLES:
         titles_rows.append({
@@ -229,7 +230,7 @@ def main():
     titles_df.to_parquet(f"{OUT_DIR}/titles.parquet", index=False)
     print(f"titles.parquet written: {len(titles_df)} rows")
 
-    # --- comparable titles' viewing_events ---
+ 
     grand_total = 0
     for t in sc.COMPARABLE_TITLES:
         n = generate_title_events(
@@ -238,6 +239,7 @@ def main():
         print(f"{t['title_id']}: {n:,} viewing_events rows")
         grand_total += n
 
+    # --- demo title's viewing_events (with injected anomalies) ---
     n_demo = generate_title_events(
         sc.DEMO_TITLE, sc.DEMO_WINDOW_HOURS, f"{OUT_DIR}/events_{sc.DEMO_TITLE['title_id']}.parquet",
         negative_anomaly=sc.NEGATIVE_ANOMALY,

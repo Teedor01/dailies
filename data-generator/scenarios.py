@@ -16,12 +16,11 @@ DEVICE_MIX = {
 TV_APP_VERSIONS = {
     "4.0": 0.30,
     "4.1": 0.35,
-    "4.2": 0.35,  
+    "4.2": 0.35, 
 }
 
 
 NOW = datetime(2026, 8, 1, 12, 0, 0)
-
 
 COMPARABLE_TITLES = [
     {
@@ -60,19 +59,18 @@ DEMO_TITLE = {
 }
 DEMO_WINDOW_HOURS = 14
 
-
 NEGATIVE_ANOMALY = {
     "region": "LATAM",
     "hour_start": 6,
-    "hour_end": 9,         
+    "hour_end": 9,          # inclusive
     "affected_device": "tv",
     "affected_app_version": "4.2",
-    "affected_device_share": 0.45,       
+    "affected_device_share": 0.45,      
     "affected_version_share": 0.55,      
     "affected_completion_mean": 0.05,
     "affected_completion_std": 0.03,
     "affected_buffering_lambda": 5.0,     
-    "unaffected_dampening": 0.75,         
+    "unaffected_dampening": 0.75,        
     "normal_buffering_lambda": 0.15,
 }
 

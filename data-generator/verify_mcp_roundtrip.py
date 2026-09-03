@@ -82,6 +82,7 @@ async def main():
             print(text[:800])
 
             print("\n=== Step C: simulated INVESTIGATE query (safety-gated, real MCP call) ===")
+
             investigate_sql = """
                 SELECT
                     device_type,

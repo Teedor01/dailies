@@ -7,7 +7,7 @@ PASS_CASES = [
     "SELECT region, count(*) FROM viewing_events GROUP BY region",
     """WITH x AS (SELECT region, avg(completion_pct) AS c FROM dailies.viewing_events GROUP BY region)
        SELECT * FROM x WHERE c < 0.5""",
-    "select region from dailies.viewing_events limit 5",  # lowercase keyword
+    "select region from dailies.viewing_events limit 5",  
 ]
 
 FAIL_CASES = [
@@ -43,6 +43,7 @@ def run():
     print("\n=== FAIL cases (should be rejected) ===")
     for sql, label in FAIL_CASES:
         ok, reason = validate_sql(sql)
+       
         if label.startswith("not blocked"):
             status = "KNOWN GAP" if ok else "OK (unexpectedly caught)"
             print(f"[{status}] {label} :: reason={reason}")
