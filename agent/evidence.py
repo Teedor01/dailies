@@ -1,15 +1,16 @@
 from typing import Literal, Optional
+from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 
 
 EvidenceType = Literal[
-    "observed_fact",        
-    "correlation",           
-    "hypothesis",            
+    "observed_fact",       
+    "correlation",          
+    "hypothesis",             
     "verified_finding",       
     "rejected_hypothesis",    
-    "query_error",             
+    "query_error",            
 ]
 
 
@@ -31,9 +32,11 @@ def new_evidence_entry(
         "result_sample": result_sample,
         "claim": claim_text,
         "supports": supports or [],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     evidence_log.append(entry)
     return entry
+
 
 
 
@@ -61,7 +64,6 @@ class Brief(BaseModel):
     summary: str = Field(description="1-2 sentence high-level summary of the investigation.")
     claims: list[Claim]
     rejected_hypotheses: list[RejectedHypothesis] = Field(default_factory=list)
-
 
 
 
