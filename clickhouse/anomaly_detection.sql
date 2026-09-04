@@ -18,6 +18,7 @@ SELECT
     round(bp.p50_views_per_hour, 1) AS p50_views_per_hour,
     round(bp.p75_views_per_hour, 1) AS p75_views_per_hour,
     round(bp.p50_completion_pct, 4) AS p50_completion_pct,
+    (SELECT release_datetime FROM dailies.titles WHERE title_id = {title_id:String}) AS release_datetime,
     multiIf(
         cm.avg_completion_pct < bp.p50_completion_pct * 0.7, 'negative_completion_anomaly',
         cm.views_this_hour < bp.p25_views_per_hour, 'negative_volume_anomaly',
