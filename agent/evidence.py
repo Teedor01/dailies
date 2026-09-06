@@ -10,6 +10,7 @@ EvidenceType = Literal[
     "hypothesis",             
     "verified_finding",       
     "rejected_hypothesis",    
+    "inconclusive_finding",
     "query_error",            
 ]
 
@@ -22,8 +23,20 @@ def new_evidence_entry(
     sql: Optional[str] = None,
     result_sample=None,
     supports: Optional[list[str]] = None,
+    verifies_hypothesis: Optional[str] = None,
+    anomaly_id: Optional[str] = None,
 ) -> dict:
-    """Appends a new evidence entry and returns it. Mutates evidence_log in place."""
+    """Appends a new evidence entry and returns it. Mutates evidence_log in place.
+
+    verifies_hypothesis: set ONLY on the verdict entry produced by VERIFY
+    (verified_finding / rejected_hypothesis / inconclusive_finding), pointing
+    back at the hypothesis id it resolves.
+
+    anomaly_id: which detected anomaly this entry is about. A single
+    investigation run processes every anomaly found for a title in one pass,
+    so without this there was no way to tell which findings belong to (say)
+    the LATAM completion anomaly vs. the APAC volume anomaly -- the product
+    needs this to show a movie's anomalies as separate, trackable threads."""
     entry = {
         "id": f"ev_{len(evidence_log) + 1:03d}",
         "entry_type": entry_type,
@@ -32,6 +45,8 @@ def new_evidence_entry(
         "result_sample": result_sample,
         "claim": claim_text,
         "supports": supports or [],
+        "verifies_hypothesis": verifies_hypothesis,
+        "anomaly_id": anomaly_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     evidence_log.append(entry)

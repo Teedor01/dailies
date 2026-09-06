@@ -72,6 +72,22 @@ Rules:
   is INCONCLUSIVE for the hypothesis, citing the actual numbers returned.
   Do not use causal language ("caused", "because", "proves")... use
   "associated with" / "consistent with" / "supports the hypothesis that".
+- Your response is parsed by code, not read by a person, so end it with
+  EXACTLY one line, and nothing after it, in this literal format:
+      VERDICT: SUPPORTED
+  or
+      VERDICT: CONTRADICTED
+  or
+      VERDICT: INCONCLUSIVE
+  Use SUPPORTED only if the query ran successfully and its result clearly
+  supports the hypothesis. Use CONTRADICTED only if the query ran
+  successfully and its result clearly rules the hypothesis out. Use
+  INCONCLUSIVE if the query failed, returned no usable data, or the result
+  is ambiguous. This line must appear only once, in plain text, with no
+  markdown, bold, or extra words on it -- the earlier part of your response
+  may use the words "support" or "contradict" in the framing discussion
+  above, but this final line is the only thing that determines the
+  classification, so it must reflect your actual conclusion and nothing else.
 """
 
 

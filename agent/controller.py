@@ -1,4 +1,6 @@
 import json
+import re
+from typing import Optional
 
 from anomaly_detector import detect_anomalies
 from tool_reasoner import build_investigate_agent, build_verify_agent
@@ -26,17 +28,49 @@ def _response_is_error(response) -> bool:
     return False
 
 
+
+_VERDICT_LINE_RE = re.compile(r"VERDICT\s*:\s*(SUPPORTED|CONTRADICTED|INCONCLUSIVE)", re.IGNORECASE)
+
+_VERDICT_TO_STATE = {
+    "SUPPORTED": "verified",
+    "CONTRADICTED": "rejected",
+    "INCONCLUSIVE": "inconclusive",
+}
+
+_STATE_TO_ENTRY_TYPE = {
+    "verified": "verified_finding",
+    "rejected": "rejected_hypothesis",
+    "inconclusive": "inconclusive_finding",
+}
+
+
+def _extract_verdict_state(text: str) -> str:
+    """Deterministically parses the agent's required VERDICT line. Returns
+    one of 'verified' / 'rejected' / 'inconclusive'. Falls back to
+    'inconclusive' if the agent didn't emit a well-formed verdict line --
+    never guesses at a definitive verdict from loose prose."""
+    matches = _VERDICT_LINE_RE.findall(text or "")
+    if not matches:
+        return "inconclusive"
+    return _VERDICT_TO_STATE[matches[-1].upper()]
+
+
 class InvestigationController:
-    def __init__(self, run_query, title_id: str, on_event=None):
+    def __init__(self, run_query, title_id: str, title_name: Optional[str] = None, on_event=None):
         """
         run_query: callable(sql: str) -> list[dict], from db_adapters.py...
             used ONLY for the deterministic OBSERVE step, never for agent calls.
         title_id: the title under investigation.
+        title_name: display name of the movie (e.g. "Orbital Ash"), used in
+            evidence claim text and agent prompts so the investigation reads
+            as being about a release, not a database row. Falls back to
+            title_id if not provided, so this stays backward compatible.
         on_event: optional callback(step: str, payload: dict), for a future
             UI/SSE layer to hook into. Safe to leave as None for now.
         """
         self.run_query = run_query
         self.title_id = title_id
+        self.title_name = title_name or title_id
         self.evidence_log = []
         self.on_event = on_event or (lambda step, payload: None)
 
@@ -57,12 +91,13 @@ class InvestigationController:
             new_evidence_entry(
                 self.evidence_log, "observed_fact", "OBSERVE",
                 claim_text=(
-                    f"{a['region']} showed a {a['anomaly_type']} between hours "
-                    f"{a['window_start_hour']}-{a['window_end_hour']} "
+                    f"During {self.title_name}'s release, {a['region']} showed a "
+                    f"{a['anomaly_type']} between hours {a['window_start_hour']}-{a['window_end_hour']} "
                     f"(observed={a['observed_value']}, baseline={baseline_val})"
                 ),
                 sql=None,  
                 result_sample=a,
+                anomaly_id=a["anomaly_id"],
             )
 
             a["_evidence_id"] = self.evidence_log[-1]["id"]
@@ -75,9 +110,11 @@ class InvestigationController:
         self._emit("INVESTIGATE", {"status": "running", "anomaly_id": anomaly["anomaly_id"]})
         agent = build_investigate_agent()
         prompt = (
-            "Here is a confirmed anomaly, detected deterministically (not by you):\n\n"
+            f"Here is a confirmed anomaly in {self.title_name}'s release, detected "
+            "deterministically (not by you):\n\n"
             f"{json.dumps(_strip_detail(anomaly), indent=2)}\n\n"
-            f"Investigate why this happened. The title_id is '{self.title_id}'.\n\n"
+            f"Investigate why this happened during {self.title_name}'s release "
+            f"(title_id '{self.title_id}').\n\n"
             "IMPORTANT: window_start_timestamp and window_end_timestamp above are the exact "
             "real calendar boundaries of this anomaly, already computed for you. Filter every "
             "query using `timestamp >= 'window_start_timestamp' AND timestamp < 'window_end_timestamp'` "
@@ -103,6 +140,7 @@ class InvestigationController:
                 ),
                 sql=sql,
                 result_sample=call["response"],
+                anomaly_id=anomaly["anomaly_id"],
             )
             new_ids.append(entry["id"])
 
@@ -128,6 +166,7 @@ class InvestigationController:
                 self.evidence_log, "hypothesis", "HYPOTHESIZE",
                 claim_text=h.text,
                 supports=h.supporting_evidence_ids,
+                anomaly_id=anomaly["anomaly_id"],
             )
             hyps.append({"hypothesis_id": entry["id"], "text": h.text})
 
@@ -139,7 +178,7 @@ class InvestigationController:
         self._emit("VERIFY", {"status": "running", "hypothesis_id": hypothesis["hypothesis_id"]})
         agent = build_verify_agent()
         prompt = (
-            f"Hypothesis to verify: {hypothesis['text']}\n\n"
+            f"Hypothesis to verify, about {self.title_name}'s release: {hypothesis['text']}\n\n"
             "This hypothesis concerns the following anomaly. Unless the hypothesis is "
             "specifically claiming the issue is NOT limited to this window (e.g. a ubiquitous "
             "platform-wide bug), your verification query MUST filter to this same region and "
@@ -157,7 +196,8 @@ class InvestigationController:
         )
         text, tool_calls = run_agent_with_tool_calls(agent, prompt)
 
-        verify_ids = []
+        verify_ids = []       
+        real_evidence_ids = []  
         for call in tool_calls:
             if call["tool_name"] not in ("run_query", "run_chdb_select_query"):
                 continue
@@ -173,26 +213,33 @@ class InvestigationController:
                 ),
                 sql=call["args"].get("query", str(call["args"])),
                 result_sample=call["response"],
+                anomaly_id=anomaly["anomaly_id"],
             )
             verify_ids.append(entry["id"])
+            if not is_error:
+                real_evidence_ids.append(entry["id"])
 
-        text_upper = (text or "").upper()
-        if "CONTRADICT" in text_upper:
-            verdict = "rejected"
-        elif "SUPPORT" in text_upper:
-            verdict = "verified"
-        else:
+        
+        if not real_evidence_ids:
             verdict = "inconclusive"
+            claim_text = (
+                "Verification could not be completed: every query attempt for this "
+                "hypothesis failed, so no real data exists to support or contradict it. "
+                "Forced to inconclusive regardless of the agent's stated verdict. "
+                f"Agent response: {text or '(no response returned)'}"
+            )
+        else:
+            verdict = _extract_verdict_state(text)
+            claim_text = text or "(no verdict text returned)"
 
-        entry_type = {
-            "rejected": "rejected_hypothesis",
-            "verified": "verified_finding",
-        }.get(verdict, "hypothesis")
+        entry_type = _STATE_TO_ENTRY_TYPE[verdict]
 
         new_evidence_entry(
             self.evidence_log, entry_type, "VERIFY",
-            claim_text=text or "(no verdict text returned)",
-            supports=verify_ids,
+            claim_text=claim_text,
+            supports=real_evidence_ids,
+            verifies_hypothesis=hypothesis["hypothesis_id"],
+            anomaly_id=anomaly["anomaly_id"],
         )
 
         result = {"hypothesis_id": hypothesis["hypothesis_id"], "verdict": verdict, "evidence_ids": verify_ids}
