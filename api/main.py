@@ -43,6 +43,7 @@ def _new_investigation_record(investigation_id: str, title_id: str) -> dict:
     return {
         "id": investigation_id,
         "title_id": title_id,
+        "title": None,  
         "status": "running",  
         "created_at": _now(),
         "updated_at": _now(),
@@ -54,6 +55,73 @@ def _new_investigation_record(investigation_id: str, title_id: str) -> dict:
         "events": [],
         "error": None,
     }
+
+
+def _fetch_title_context(client, title_id: str) -> dict:
+    """Loads the movie's own metadata (already in dailies.titles... this was
+    never queried before, which is why the product felt like a generic
+    analytics tool instead of a release investigation) plus two cheap
+    derived facts: how far into its release window it is, and how its
+    completion rate compares to genre baseline. Returns a dict merged
+    straight into the investigation record's "title" field; never raises...
+    a title lookup failure shouldn't block the investigation itself."""
+    result = {
+        "title_id": title_id,
+        "title_name": title_id,
+        "genre": None,
+        "runtime_min": None,
+        "release_datetime": None,
+        "release_type": None,
+        "regions": [],
+        "release_status": "unknown",
+        "hours_since_release": None,
+        "overall_performance": None,
+    }
+    try:
+        rows = client.query(
+            "SELECT title_name, genre, runtime_min, release_datetime, release_type, regions "
+            "FROM dailies.titles WHERE title_id = {title_id:String} LIMIT 1",
+            parameters={"title_id": title_id},
+        ).result_rows
+        if not rows:
+            return result
+        title_name, genre, runtime_min, release_datetime, release_type, regions = rows[0]
+        result.update({
+            "title_name": title_name,
+            "genre": genre,
+            "runtime_min": runtime_min,
+            "release_datetime": release_datetime.isoformat() if hasattr(release_datetime, "isoformat") else str(release_datetime),
+            "release_type": release_type,
+            "regions": list(regions) if regions else [],
+        })
+
+        hours_since_release = (datetime.now(timezone.utc) - release_datetime.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+        result["hours_since_release"] = round(hours_since_release, 1)
+        result["release_status"] = "first_72_hours" if hours_since_release <= 72 else "post_72_hours"
+
+        perf_rows = client.query(
+            "SELECT avg(completion_pct) FROM dailies.viewing_events WHERE title_id = {title_id:String}",
+            parameters={"title_id": title_id},
+        ).result_rows
+        avg_completion = float(perf_rows[0][0]) if perf_rows and perf_rows[0][0] is not None else None
+
+        baseline_rows = client.query(
+            "SELECT avg(p50_completion_pct) FROM dailies.baseline_pacing WHERE genre = {genre:String}",
+            parameters={"genre": genre},
+        ).result_rows
+        baseline_completion = float(baseline_rows[0][0]) if baseline_rows and baseline_rows[0][0] is not None else None
+
+        if avg_completion is not None and baseline_completion is not None:
+            result["overall_performance"] = {
+                "avg_completion_pct": round(avg_completion, 4),
+                "baseline_completion_pct": round(baseline_completion, 4),
+                "delta_pct": round(avg_completion - baseline_completion, 4),
+            }
+    except Exception:
+        # Title context is presentational -- an investigation should still
+        # run and produce a brief even if this lookup fails for any reason.
+        pass
+    return result
 
 
 def _public_view(record: dict) -> dict:
@@ -88,9 +156,15 @@ def _run_pipeline(investigation_id: str, title_id: str):
         )
         run_query = clickhouse_connect_adapter(client)
 
-        controller_holder = {}  # populated below; on_event closes over this,
-                                  # not over `controller` directly, so it never
-                                  # references the name before assignment
+        title_context = _fetch_title_context(client, title_id)
+        with _lock:
+            record = _investigations.get(investigation_id)
+            if record is not None:
+                record["title"] = title_context
+                record["updated_at"] = _now()
+        _broadcast(investigation_id, {"step": "TITLE", "payload": {"status": "done", "title": title_context}, "timestamp": _now()})
+
+        controller_holder = {}  
 
         def on_event(step: str, payload: dict):
             with _lock:
@@ -112,7 +186,9 @@ def _run_pipeline(investigation_id: str, title_id: str):
 
             _broadcast(investigation_id, {"step": step, "payload": payload, "timestamp": _now()})
 
-        controller = InvestigationController(run_query, title_id, on_event=on_event)
+        controller = InvestigationController(
+            run_query, title_id, title_name=title_context.get("title_name"), on_event=on_event
+        )
         controller_holder["controller"] = controller
 
         result = controller.run_full_investigation()
