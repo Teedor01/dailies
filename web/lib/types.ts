@@ -24,7 +24,13 @@ export interface EvidenceEntry {
   title_id?: string;
 }
 
-export type StepName = "OBSERVE" | "INVESTIGATE" | "HYPOTHESIZE" | "VERIFY" | "BRIEF";
+export type StepName =
+  | "OBSERVE"
+  | "INVESTIGATE"
+  | "HYPOTHESIZE"
+  | "VERIFY"
+  | "BRIEF";
+
 export type StepStatus = "pending" | "in_progress" | "complete";
 
 export interface StepState {
@@ -95,13 +101,13 @@ export interface InvestigationSummary {
   updated_at: string;
   steps: Record<StepName, StepState>;
   anomalies: Anomaly[];
+  evidence_log: EvidenceEntry[];
   brief: Brief | null;
   validation_problems: string[];
   error: string | null;
 }
 
 export interface InvestigationDetail extends InvestigationSummary {
-  evidence_log: EvidenceEntry[];
   events: PipelineEvent[];
 }
 
