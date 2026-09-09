@@ -11,6 +11,7 @@ EvidenceType = Literal[
     "verified_finding",       
     "rejected_hypothesis",    
     "inconclusive_finding",
+    "notable_pattern",
     "query_error",            
 ]
 
@@ -25,6 +26,7 @@ def new_evidence_entry(
     supports: Optional[list[str]] = None,
     verifies_hypothesis: Optional[str] = None,
     anomaly_id: Optional[str] = None,
+    key_metrics: Optional[dict] = None,
 ) -> dict:
     """Appends a new evidence entry and returns it. Mutates evidence_log in place.
 
@@ -32,11 +34,12 @@ def new_evidence_entry(
     (verified_finding / rejected_hypothesis / inconclusive_finding), pointing
     back at the hypothesis id it resolves.
 
-    anomaly_id: which detected anomaly this entry is about. A single
-    investigation run processes every anomaly found for a title in one pass,
-    so without this there was no way to tell which findings belong to (say)
-    the LATAM completion anomaly vs. the APAC volume anomaly -- the product
-    needs this to show a movie's anomalies as separate, trackable threads."""
+    anomaly_id: which detected anomaly this entry is about.
+
+    key_metrics: optional structured two-group comparison (see VERIFY_KEY_METRICS_RE
+    in controller.py), parsed from the agent's optional KEY_METRICS block. None
+    when the agent didn't provide one -- the UI falls back to prose in that case,
+    it never fabricates a comparison that wasn't actually measured."""
     entry = {
         "id": f"ev_{len(evidence_log) + 1:03d}",
         "entry_type": entry_type,
@@ -47,6 +50,7 @@ def new_evidence_entry(
         "supports": supports or [],
         "verifies_hypothesis": verifies_hypothesis,
         "anomaly_id": anomaly_id,
+        "key_metrics": key_metrics,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     evidence_log.append(entry)

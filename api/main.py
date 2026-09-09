@@ -118,8 +118,7 @@ def _fetch_title_context(client, title_id: str) -> dict:
                 "delta_pct": round(avg_completion - baseline_completion, 4),
             }
     except Exception:
-        # Title context is presentational -- an investigation should still
-        # run and produce a brief even if this lookup fails for any reason.
+
         pass
     return result
 

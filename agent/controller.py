@@ -55,6 +55,44 @@ def _extract_verdict_state(text: str) -> str:
     return _VERDICT_TO_STATE[matches[-1].upper()]
 
 
+_NOTABLE_PATTERN_RE = re.compile(r"NOTABLE_PATTERN\s*:\s*(.+)")
+
+_KEY_METRICS_BLOCK_RE = re.compile(r"KEY_METRICS\s*:\s*\n((?:[ \t]*\w+\s*:\s*.+\n?)+)")
+_KEY_METRICS_LINE_RE = re.compile(r"^[ \t]*(\w+)\s*:\s*(.+?)\s*$")
+
+
+def _extract_notable_pattern(text: str) -> Optional[str]:
+    """Pulls the optional single-sentence NOTABLE_PATTERN line out of an
+    investigate agent's response, if it emitted one. Returns None (not an
+    empty string) when absent -- callers must not fabricate a notable-pattern
+    card when the agent didn't actually flag one."""
+    match = _NOTABLE_PATTERN_RE.search(text or "")
+    return match.group(1).strip() if match else None
+
+
+def _extract_key_metrics(text: str) -> Optional[dict]:
+    """Parses the optional KEY_METRICS: block a verify agent may emit into a
+    plain dict of strings. Numeric-looking values are converted to float so
+    the frontend can format them (round, add '%', etc.) itself rather than
+    trusting whatever precision the agent printed. Returns None if the agent
+    didn't include the block -- never invents a two-group comparison that
+    wasn't actually measured."""
+    block_match = _KEY_METRICS_BLOCK_RE.search(text or "")
+    if not block_match:
+        return None
+    metrics: dict = {}
+    for line in block_match.group(1).splitlines():
+        line_match = _KEY_METRICS_LINE_RE.match(line)
+        if not line_match:
+            continue
+        key, value = line_match.group(1), line_match.group(2)
+        try:
+            metrics[key] = float(value)
+        except ValueError:
+            metrics[key] = value
+    return metrics or None
+
+
 class InvestigationController:
     def __init__(self, run_query, title_id: str, title_name: Optional[str] = None, on_event=None):
         """
@@ -102,6 +140,7 @@ class InvestigationController:
 
             a["_evidence_id"] = self.evidence_log[-1]["id"]
 
+        self._last_anomalies = anomalies
         self._emit("OBSERVE", {"status": "done", "anomaly_count": len(anomalies)})
         return anomalies
 
@@ -121,7 +160,7 @@ class InvestigationController:
             "with those literal values. Do NOT compute hour-since-release yourself, do NOT use "
             "toHour(timestamp) as a substitute for this, and do NOT guess or invent any date."
         )
-        _, tool_calls = run_agent_with_tool_calls(agent, prompt)
+        text, tool_calls = run_agent_with_tool_calls(agent, prompt)
 
         new_ids = []
         for call in tool_calls:
@@ -143,6 +182,24 @@ class InvestigationController:
                 anomaly_id=anomaly["anomaly_id"],
             )
             new_ids.append(entry["id"])
+
+
+        if text:
+            summary_entry = new_evidence_entry(
+                self.evidence_log, "observed_fact", "INVESTIGATE",
+                claim_text=text,
+                anomaly_id=anomaly["anomaly_id"],
+            )
+            new_ids.append(summary_entry["id"])
+
+            notable = _extract_notable_pattern(text)
+            if notable:
+                notable_entry = new_evidence_entry(
+                    self.evidence_log, "notable_pattern", "INVESTIGATE",
+                    claim_text=notable,
+                    anomaly_id=anomaly["anomaly_id"],
+                )
+                new_ids.append(notable_entry["id"])
 
         self._emit("INVESTIGATE", {"status": "done", "evidence_ids": new_ids})
         return new_ids
@@ -196,7 +253,7 @@ class InvestigationController:
         )
         text, tool_calls = run_agent_with_tool_calls(agent, prompt)
 
-        verify_ids = []       
+        verify_ids = []      
         real_evidence_ids = []  
         for call in tool_calls:
             if call["tool_name"] not in ("run_query", "run_chdb_select_query"):
@@ -219,7 +276,7 @@ class InvestigationController:
             if not is_error:
                 real_evidence_ids.append(entry["id"])
 
-        
+
         if not real_evidence_ids:
             verdict = "inconclusive"
             claim_text = (
@@ -233,6 +290,7 @@ class InvestigationController:
             claim_text = text or "(no verdict text returned)"
 
         entry_type = _STATE_TO_ENTRY_TYPE[verdict]
+        key_metrics = _extract_key_metrics(text) if real_evidence_ids else None
 
         new_evidence_entry(
             self.evidence_log, entry_type, "VERIFY",
@@ -240,6 +298,7 @@ class InvestigationController:
             supports=real_evidence_ids,
             verifies_hypothesis=hypothesis["hypothesis_id"],
             anomaly_id=anomaly["anomaly_id"],
+            key_metrics=key_metrics,
         )
 
         result = {"hypothesis_id": hypothesis["hypothesis_id"], "verdict": verdict, "evidence_ids": verify_ids}

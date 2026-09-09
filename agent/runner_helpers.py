@@ -47,7 +47,7 @@ def _extract_retry_delay(exc: Exception, default: float = DEFAULT_RETRY_DELAY_SE
 def run_agent_once(agent, user_message: str, app_name: str = "dailies") -> str:
     """
     Runs a single-turn conversation with an ADK agent and returns the final
-    text response as a string. Creates a fresh in-memory session per call --
+    text response as a string. Creates a fresh in-memory session per call...
     each reasoning step in this pipeline is stateless by design; the
     deterministic controller (not agent memory) carries context between steps
     via what it puts INTO the prompt each time.
@@ -61,8 +61,8 @@ def run_agent_with_tool_calls(
 ):
     """
     Like run_agent_once, but also returns the REAL tool calls made during the
-    run -- the actual SQL text sent and the actual result returned. This is
-    what evidence_log entries must be built from (see evidence.py) -- Gemini's
+    run... the actual SQL text sent and the actual result returned. This is
+    what evidence_log entries must be built from (see evidence.py), Gemini's
     final-text summary is a paraphrase and must never be the source of a
     number in evidence_log; the tool call/response pair is the source of truth.
 
@@ -70,7 +70,7 @@ def run_agent_with_tool_calls(
         {"tool_name": str, "args": dict, "response": Any}
 
     On a 429 rate-limit error, retries with a FRESH session (not a resumed
-    one) up to max_retries times -- resuming the same session after a
+    one) up to max_retries times... resuming the same session after a
     mid-conversation failure risks confusing multi-turn state; a clean retry
     of the same single-turn prompt is simpler and safe here since every call
     in this pipeline is already designed to be a stateless, self-contained
@@ -91,7 +91,7 @@ def run_agent_with_tool_calls(
             content = types.Content(role="user", parts=[types.Part(text=user_message)])
             final_text = None
             tool_calls = []
-            pending_calls = {}  # function_call.id -> {"tool_name": ..., "args": ...}
+            pending_calls = {}  
 
             async for event in runner.run_async(
                 user_id=user_id, session_id=session_id, new_message=content
